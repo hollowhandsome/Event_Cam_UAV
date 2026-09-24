@@ -185,7 +185,7 @@ Python 接收/解码示例、公开 C 头文件和两种模式的二进制/PCAP 
 新增的 `upper_host` 目录面向相机和上位机运行在同一台 Windows x64 电脑的部署方式：
 
 - C++ `EventCore.dll` 直接调用 DVSense SDK，并使用 OpenCV `cv::Mat` 独立管理最多 20 路相机事件、成帧和参数读写；
-- C# WPF 以 10 组 × 宽/窄视场显示 20 路画面，支持单路放大、Bias 配置和单路/批量启停；
+- C# WPF 以 5 行 × 4 列显示 10 组宽/窄视场共 20 路画面，默认适配 1280×720，支持单路放大、Bias 配置和单路/批量启停；
 - C# 与 C++ 通过 P/Invoke 在本机进程内通信，不经过 UEVT/UDP。
 
 安装 MSVC C++ Build Tools 后，依次双击 `构建_同机上位机.cmd` 和

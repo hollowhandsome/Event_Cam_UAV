@@ -1,0 +1,7 @@
+**/bin/
+**/obj/
+native/build/
+native/build-msvc/
+native/build-msvc-opencv/
+native/bin/
+native/vcpkg_installed/

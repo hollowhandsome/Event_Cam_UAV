@@ -13,6 +13,7 @@ public partial class MainWindow : Window
 {
     private const int OverviewRowCount = 5;
     private const int OverviewColumnCount = 4;
+    private const int TargetFramesPerSecond = 60;
 
     private sealed class CameraTile
     {
@@ -50,7 +51,7 @@ public partial class MainWindow : Window
 
         _frameTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
-            Interval = TimeSpan.FromMilliseconds(40)
+            Interval = TimeSpan.FromSeconds(1.0 / TargetFramesPerSecond)
         };
         _frameTimer.Tick += FrameTimer_Tick;
         Loaded += MainWindow_Loaded;
@@ -70,7 +71,7 @@ public partial class MainWindow : Window
         for (int slot = 0; slot < NativeMethods.SlotCount; slot++)
         {
             var image = new Image { Stretch = Stretch.Uniform };
-            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.NearestNeighbor);
+            RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             var title = new TextBlock
             {
                 Text = GetSlotName(slot),

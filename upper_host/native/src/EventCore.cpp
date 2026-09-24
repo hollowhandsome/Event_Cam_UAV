@@ -16,7 +16,7 @@
 
 namespace {
 
-constexpr auto frame_interval = std::chrono::milliseconds(40);
+constexpr auto frame_interval = std::chrono::microseconds(16667);
 
 int copy_string(const std::string& value, char* buffer, const int capacity) {
     const auto required = static_cast<int>(value.size() + 1);

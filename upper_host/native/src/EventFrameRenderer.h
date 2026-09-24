@@ -9,8 +9,8 @@
 
 class EventFrameRenderer final {
 public:
-    static constexpr int preview_width = 320;
-    static constexpr int preview_height = 180;
+    static constexpr int preview_width = 1280;
+    static constexpr int preview_height = 720;
 
     void initialize(int sensor_width, int sensor_height);
     void add_events(const dvsense::Event2D* begin, const dvsense::Event2D* end);

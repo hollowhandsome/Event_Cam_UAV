@@ -111,7 +111,7 @@
             <Grid x:Name="FocusView" Grid.ColumnSpan="3" Panel.ZIndex="20"
                   Background="#0C0E11" Visibility="Collapsed">
                 <Image x:Name="FocusImage" Stretch="Uniform"
-                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                       RenderOptions.BitmapScalingMode="HighQuality"
                        MouseLeftButtonDown="FocusImage_MouseLeftButtonDown" />
                 <Border VerticalAlignment="Top" Background="#CC15181D" Padding="12">
                     <Grid>

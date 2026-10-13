@@ -11,34 +11,74 @@ void EventFrameRenderer::initialize(const int sensor_width, const int sensor_hei
     std::lock_guard frame_lock(frame_mutex_);
     sensor_width_ = sensor_width;
     sensor_height_ = sensor_height;
-    front_frame_ = cv::Mat(
-        preview_height, preview_width, CV_8UC3, background_color);
-    accumulation_frame_ = cv::Mat(
-        preview_height, preview_width, CV_8UC3, background_color);
+    reset_frames_locked();
     frame_id_.store(0);
+}
+
+void EventFrameRenderer::configure_output(
+    const int output_width,
+    const int output_height) {
+    if (output_width <= 0 || output_height <= 0) {
+        return;
+    }
+    std::lock_guard frame_lock(frame_mutex_);
+    if (output_width_ == output_width && output_height_ == output_height) {
+        return;
+    }
+    output_width_ = output_width;
+    output_height_ = output_height;
+    if (sensor_width_ > 0 && sensor_height_ > 0) {
+        reset_frames_locked();
+        frame_id_.fetch_add(1);
+    }
+}
+
+void EventFrameRenderer::deactivate() {
+    std::lock_guard frame_lock(frame_mutex_);
+    sensor_width_ = 0;
+    sensor_height_ = 0;
+    front_frame_.release();
+    accumulation_frame_.release();
+}
+
+void EventFrameRenderer::reset_frames_locked() {
+    front_frame_ = cv::Mat(
+        output_height_, output_width_, CV_8UC3, background_color);
+    accumulation_frame_ = cv::Mat(
+        output_height_, output_width_, CV_8UC3, background_color);
 }
 
 void EventFrameRenderer::add_events(
     const dvsense::Event2D* begin,
     const dvsense::Event2D* end) {
-    if (begin == nullptr || end == nullptr || end < begin ||
-        sensor_width_ <= 0 || sensor_height_ <= 0) {
+    if (begin == nullptr || end == nullptr || end < begin) {
         return;
     }
 
     std::lock_guard frame_lock(frame_mutex_);
-    if (accumulation_frame_.empty()) {
+    if (sensor_width_ <= 0 || sensor_height_ <= 0 ||
+        accumulation_frame_.empty()) {
         return;
     }
     for (auto event = begin; event != end; ++event) {
         if (event->x >= sensor_width_ || event->y >= sensor_height_) {
             continue;
         }
-        const int x = static_cast<int>(event->x) * preview_width / sensor_width_;
-        const int y = static_cast<int>(event->y) * preview_height / sensor_height_;
+        const int x = static_cast<int>(
+            static_cast<std::int64_t>(event->x) * output_width_ / sensor_width_);
+        const int y = static_cast<int>(
+            static_cast<std::int64_t>(event->y) * output_height_ / sensor_height_);
         auto* row = accumulation_frame_.ptr<cv::Vec3b>(y);
         row[x] = event->polarity != 0 ? on_color : off_color;
     }
+}
+
+void EventFrameRenderer::get_output_size(
+    int* output_width,
+    int* output_height) const {
+    std::lock_guard frame_lock(frame_mutex_);
+    if (output_width != nullptr) *output_width = output_width_;
+    if (output_height != nullptr) *output_height = output_height_;
 }
 
 void EventFrameRenderer::publish_frame() {
@@ -56,19 +96,18 @@ bool EventFrameRenderer::copy_latest_frame(
     const int destination_capacity,
     const int destination_stride,
     std::uint64_t* copied_frame_id) const {
-    if (destination == nullptr || copied_frame_id == nullptr ||
-        destination_stride < preview_width * 3 ||
-        destination_capacity < destination_stride * preview_height) {
+    if (destination == nullptr || copied_frame_id == nullptr) {
         return false;
     }
 
     std::lock_guard frame_lock(frame_mutex_);
-    if (front_frame_.empty()) {
+    if (front_frame_.empty() || destination_stride < output_width_ * 3 ||
+        destination_capacity < destination_stride * output_height_) {
         return false;
     }
     auto* output = static_cast<std::uint8_t*>(destination);
-    const auto source_stride = static_cast<std::size_t>(preview_width) * 3;
-    for (int row = 0; row < preview_height; ++row) {
+    const auto source_stride = static_cast<std::size_t>(output_width_) * 3;
+    for (int row = 0; row < output_height_; ++row) {
         std::memcpy(
             output + static_cast<std::size_t>(row) * destination_stride,
             front_frame_.ptr(row),

@@ -42,6 +42,27 @@
                         <TextBlock x:Name="CameraCountTextBlock" Text="已发现：0 / 20"
                                    Foreground="#AEB7C3" Margin="0,8,0,0" />
 
+                        <TextBlock Text="显示设置" FontWeight="SemiBold" Margin="0,10,0,0" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="6" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock Text="分辨率" Foreground="#AEB7C3" />
+                                <ComboBox x:Name="ResolutionComboBox"
+                                          DisplayMemberPath="DisplayName"
+                                          SelectionChanged="DisplaySettingsComboBox_SelectionChanged" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="帧率" Foreground="#AEB7C3" />
+                                <ComboBox x:Name="FrameRateComboBox"
+                                          DisplayMemberPath="DisplayName"
+                                          SelectionChanged="DisplaySettingsComboBox_SelectionChanged" />
+                            </StackPanel>
+                        </Grid>
+
                         <Separator Margin="0,10,0,8" Background="#3B414B" />
                         <TextBlock Text="当前槽位" FontSize="16" FontWeight="SemiBold" />
                         <ComboBox x:Name="SlotComboBox"

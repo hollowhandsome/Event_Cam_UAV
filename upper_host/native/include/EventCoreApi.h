@@ -42,6 +42,10 @@ EVENTCORE_API std::int32_t EVENTCORE_CALL ec_start_camera_slot(
     std::int32_t bias_diff_on);
 EVENTCORE_API void EVENTCORE_CALL ec_stop_camera_slot(std::int32_t slot);
 EVENTCORE_API void EVENTCORE_CALL ec_stop_all_cameras();
+EVENTCORE_API std::int32_t EVENTCORE_CALL ec_set_display_settings(
+    std::int32_t width,
+    std::int32_t height,
+    std::int32_t frames_per_second);
 EVENTCORE_API std::int32_t EVENTCORE_CALL ec_apply_slot_bias(
     std::int32_t slot,
     std::int32_t bias_diff_off,

@@ -16,7 +16,23 @@
 
 namespace {
 
-constexpr auto frame_interval = std::chrono::microseconds(16667);
+constexpr int default_frames_per_second = 60;
+constexpr int default_frame_interval_microseconds = 16667;
+
+bool valid_display_settings(
+    const int width,
+    const int height,
+    const int frames_per_second) {
+    const bool valid_resolution =
+        (width == 1280 && height == 720) ||
+        (width == 640 && height == 360) ||
+        (width == 480 && height == 270) ||
+        (width == 320 && height == 180);
+    return valid_resolution &&
+        (frames_per_second == 60 ||
+         frames_per_second == 45 ||
+         frames_per_second == 30);
+}
 
 int copy_string(const std::string& value, char* buffer, const int capacity) {
     const auto required = static_cast<int>(value.size() + 1);
@@ -101,6 +117,18 @@ public:
         if (frame_thread.joinable()) {
             frame_thread.join();
         }
+        renderer_.deactivate();
+    }
+
+    void configure_display(
+        const int width,
+        const int height,
+        const int frames_per_second) {
+        std::lock_guard camera_lock(camera_mutex_);
+        renderer_.configure_output(width, height);
+        const int interval =
+            (1'000'000 + frames_per_second / 2) / frames_per_second;
+        frame_interval_microseconds_.store(interval);
     }
 
     int apply_bias(const int bias_off, const int bias_on) {
@@ -120,8 +148,7 @@ public:
     int get_status(EventCoreStatus* status) const {
         if (status == nullptr) return 0;
         status->state = running_.load() ? 1 : 0;
-        status->width = EventFrameRenderer::preview_width;
-        status->height = EventFrameRenderer::preview_height;
+        renderer_.get_output_size(&status->width, &status->height);
         status->bias_diff_off = bias_off_.load();
         status->bias_diff_on = bias_on_.load();
         status->total_events = total_events_.load();
@@ -193,12 +220,18 @@ private:
     }
 
     void frame_loop() {
-        auto next_frame = std::chrono::steady_clock::now() + frame_interval;
+        auto next_frame = std::chrono::steady_clock::now();
         while (running_.load()) {
-            std::this_thread::sleep_until(next_frame);
+            const auto frame_interval = std::chrono::microseconds(
+                frame_interval_microseconds_.load());
             next_frame += frame_interval;
+            std::this_thread::sleep_until(next_frame);
+            if (!running_.load()) break;
             renderer_.publish_frame();
             const auto now = std::chrono::steady_clock::now();
+            if (next_frame + frame_interval < now) {
+                next_frame = now;
+            }
             const auto elapsed = std::chrono::duration<double>(now - last_rate_time_).count();
             if (elapsed >= 1.0) {
                 const auto current = total_events_.load();
@@ -228,6 +261,8 @@ private:
     std::chrono::steady_clock::time_point last_rate_time_;
     std::atomic<int> bias_off_ = 0;
     std::atomic<int> bias_on_ = 0;
+    std::atomic<int> frame_interval_microseconds_ =
+        default_frame_interval_microseconds;
     mutable std::mutex error_mutex_;
     std::string last_error_;
 };
@@ -284,6 +319,10 @@ public:
         try {
             std::lock_guard manager_lock(manager_mutex_);
             ensure_manager();
+            sessions_[slot]->configure_display(
+                display_width_.load(),
+                display_height_.load(),
+                frames_per_second_.load());
             return sessions_[slot]->start(*manager_, requested_serial, bias_off, bias_on);
         } catch (const std::exception& error) {
             set_error(std::string("Failed to open camera slot: ") + error.what());
@@ -293,6 +332,28 @@ public:
 
     void stop_slot(const int slot) { if (valid_slot(slot)) sessions_[slot]->stop(); }
     void stop_all() { for (auto& session : sessions_) session->stop(); }
+    int set_display_settings(
+        const int width,
+        const int height,
+        const int frames_per_second) {
+        if (!valid_display_settings(width, height, frames_per_second)) {
+            set_error("Unsupported display resolution or frame rate.");
+            return 0;
+        }
+        try {
+            for (auto& session : sessions_) {
+                session->configure_display(width, height, frames_per_second);
+            }
+            display_width_.store(width);
+            display_height_.store(height);
+            frames_per_second_.store(frames_per_second);
+            set_error("");
+            return 1;
+        } catch (const std::exception& error) {
+            set_error(std::string("Failed to apply display settings: ") + error.what());
+            return 0;
+        }
+    }
     int apply_slot_bias(const int slot, const int off, const int on) {
         return valid_slot(slot) ? sessions_[slot]->apply_bias(off, on) : 0;
     }
@@ -328,6 +389,9 @@ private:
     std::unique_ptr<dvsense::DvsCameraManager> manager_;
     mutable std::mutex manager_mutex_;
     std::array<std::unique_ptr<CameraSession>, EVENTCORE_SLOT_COUNT> sessions_;
+    std::atomic<int> display_width_ = EventFrameRenderer::default_output_width;
+    std::atomic<int> display_height_ = EventFrameRenderer::default_output_height;
+    std::atomic<int> frames_per_second_ = default_frames_per_second;
     mutable std::mutex error_mutex_;
     std::string last_error_;
 };
@@ -346,6 +410,11 @@ std::int32_t EVENTCORE_CALL ec_start_camera_slot(
     const std::int32_t on) { return core.start_slot(slot, serial, off, on); }
 void EVENTCORE_CALL ec_stop_camera_slot(const std::int32_t slot) { core.stop_slot(slot); }
 void EVENTCORE_CALL ec_stop_all_cameras() { core.stop_all(); }
+std::int32_t EVENTCORE_CALL ec_set_display_settings(
+    const std::int32_t width, const std::int32_t height,
+    const std::int32_t frames_per_second) {
+    return core.set_display_settings(width, height, frames_per_second);
+}
 std::int32_t EVENTCORE_CALL ec_apply_slot_bias(
     const std::int32_t slot, const std::int32_t off, const std::int32_t on) {
     return core.apply_slot_bias(slot, off, on);

@@ -11,9 +11,36 @@ namespace EventCameraViewer.UI;
 
 public partial class MainWindow : Window
 {
+    private sealed record ResolutionOption(int Width, int Height)
+    {
+        public string DisplayName => $"{Width} × {Height}";
+    }
+
+    private sealed record FrameRateOption(int FramesPerSecond)
+    {
+        public string DisplayName => $"{FramesPerSecond} FPS";
+    }
+
     private const int OverviewRowCount = 5;
     private const int OverviewColumnCount = 4;
-    private const int TargetFramesPerSecond = 60;
+    private const int HighResolutionWidth = 1280;
+    private const int HighResolutionHeight = 720;
+    private const int HighFramesPerSecond = 60;
+
+    private static readonly ResolutionOption[] ResolutionOptions =
+    [
+        new(320, 180),
+        new(480, 270),
+        new(640, 360),
+        new(1280, 720)
+    ];
+
+    private static readonly FrameRateOption[] FrameRateOptions =
+    [
+        new(30),
+        new(45),
+        new(60)
+    ];
 
     private sealed class CameraTile
     {
@@ -39,10 +66,17 @@ public partial class MainWindow : Window
     private bool _nativeInitialized;
     private bool _busy;
     private bool _updatingControls;
+    private bool _updatingDisplaySettings;
+    private int _previewWidth = HighResolutionWidth;
+    private int _previewHeight = HighResolutionHeight;
+    private int _targetFramesPerSecond = HighFramesPerSecond;
 
     public MainWindow()
     {
         InitializeComponent();
+        ResolutionComboBox.ItemsSource = ResolutionOptions;
+        FrameRateComboBox.ItemsSource = FrameRateOptions;
+        UpdateDisplaySettingControls();
         CreateCameraTiles();
         SlotComboBox.ItemsSource = Enumerable.Range(0, NativeMethods.SlotCount)
             .Select(GetSlotName)
@@ -51,7 +85,7 @@ public partial class MainWindow : Window
 
         _frameTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
-            Interval = TimeSpan.FromSeconds(1.0 / TargetFramesPerSecond)
+            Interval = TimeSpan.FromSeconds(1.0 / _targetFramesPerSecond)
         };
         _frameTimer.Tick += FrameTimer_Tick;
         Loaded += MainWindow_Loaded;
@@ -143,6 +177,8 @@ public partial class MainWindow : Window
         try
         {
             NativeMethods.Initialize();
+            NativeMethods.SetDisplaySettings(
+                _previewWidth, _previewHeight, _targetFramesPerSecond);
             _nativeInitialized = true;
             MessageTextBlock.Text = "C++ 多相机数据核心初始化成功。";
             _frameTimer.Start();
@@ -164,6 +200,58 @@ public partial class MainWindow : Window
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
         await RefreshCamerasAsync();
+
+    private void DisplaySettingsComboBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (_updatingDisplaySettings || !_nativeInitialized || _busy) return;
+        if (ResolutionComboBox.SelectedItem is not ResolutionOption resolution ||
+            FrameRateComboBox.SelectedItem is not FrameRateOption frameRate)
+            return;
+        ApplyDisplaySettings(
+            resolution.Width,
+            resolution.Height,
+            frameRate.FramesPerSecond);
+    }
+
+    private void ApplyDisplaySettings(int width, int height, int framesPerSecond)
+    {
+        if (!_nativeInitialized || _busy) return;
+        try
+        {
+            NativeMethods.SetDisplaySettings(width, height, framesPerSecond);
+            _previewWidth = width;
+            _previewHeight = height;
+            _targetFramesPerSecond = framesPerSecond;
+            _frameTimer.Interval = TimeSpan.FromSeconds(1.0 / framesPerSecond);
+            foreach (CameraTile tile in _tiles)
+            {
+                tile.LastFrameId = ulong.MaxValue;
+                tile.Bitmap = null;
+                tile.Image.Source = null;
+            }
+            FocusImage.Source = null;
+            UpdateDisplaySettingControls();
+            MessageTextBlock.Text =
+                $"显示设置已切换为 {width}×{height}，{framesPerSecond} FPS。";
+        }
+        catch (Exception error)
+        {
+            UpdateDisplaySettingControls();
+            ShowError(error.Message);
+        }
+    }
+
+    private void UpdateDisplaySettingControls()
+    {
+        _updatingDisplaySettings = true;
+        ResolutionComboBox.SelectedItem = ResolutionOptions.First(option =>
+            option.Width == _previewWidth && option.Height == _previewHeight);
+        FrameRateComboBox.SelectedItem = FrameRateOptions.First(option =>
+            option.FramesPerSecond == _targetFramesPerSecond);
+        _updatingDisplaySettings = false;
+    }
 
     private async Task RefreshCamerasAsync()
     {
@@ -620,6 +708,8 @@ public partial class MainWindow : Window
             StartSelectedButton.IsEnabled = false;
             StopSelectedButton.IsEnabled = false;
             ApplyBiasButton.IsEnabled = false;
+            ResolutionComboBox.IsEnabled = false;
+            FrameRateComboBox.IsEnabled = false;
             return;
         }
         CameraTile selected = _tiles[_selectedSlot];
@@ -630,6 +720,8 @@ public partial class MainWindow : Window
         StartSelectedButton.IsEnabled = selected.Camera.HasValue && !selected.Running;
         StopSelectedButton.IsEnabled = selected.Running;
         ApplyBiasButton.IsEnabled = selected.Camera.HasValue;
+        ResolutionComboBox.IsEnabled = true;
+        FrameRateComboBox.IsEnabled = true;
         CameraComboBox.IsEnabled = !selected.Running;
     }
 

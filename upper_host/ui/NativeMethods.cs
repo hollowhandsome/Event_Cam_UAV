@@ -53,6 +53,12 @@ internal static class NativeMethods
     private static extern void ec_stop_all_cameras();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ec_set_display_settings(
+        int width,
+        int height,
+        int framesPerSecond);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ec_apply_slot_bias(int slot, int biasDiffOff, int biasDiffOn);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -119,6 +125,12 @@ internal static class NativeMethods
 
     public static void StopCamera(int slot) => ec_stop_camera_slot(slot);
     public static void StopAllCameras() => ec_stop_all_cameras();
+
+    public static void SetDisplaySettings(int width, int height, int framesPerSecond)
+    {
+        if (ec_set_display_settings(width, height, framesPerSecond) == 0)
+            throw new InvalidOperationException(GetLastError());
+    }
 
     public static void ApplyBias(int slot, int biasDiffOff, int biasDiffOn)
     {

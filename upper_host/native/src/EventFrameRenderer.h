@@ -1,11 +1,13 @@
 #pragma once
 
-#include <DvsenseBase/EventBase/EventTypes.hpp>
+#include "EventTypes.h"
+
 #include <opencv2/core.hpp>
 
 #include <atomic>
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 class EventFrameRenderer final {
 public:
@@ -15,7 +17,9 @@ public:
     void initialize(int sensor_width, int sensor_height);
     void configure_output(int output_width, int output_height);
     void deactivate();
-    void add_events(const dvsense::Event2D* begin, const dvsense::Event2D* end);
+    void add_events(const EventPoint* begin, const EventPoint* end);
+    void set_boxes(const std::vector<DetectionBox>& boxes);
+    void clear_boxes();
     void publish_frame();
     void get_output_size(int* output_width, int* output_height) const;
 
@@ -41,5 +45,6 @@ private:
     mutable std::mutex frame_mutex_;
     cv::Mat front_frame_;
     cv::Mat accumulation_frame_;
+    std::vector<DetectionBox> boxes_;
     std::atomic<std::uint64_t> frame_id_ = 0;
 };

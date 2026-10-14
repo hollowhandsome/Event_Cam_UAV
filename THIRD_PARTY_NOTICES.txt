@@ -1,7 +1,0 @@
-DVSLume Event Forwarder - Third-party notices
-
-DVSense SDK and camera driver are required at runtime but are not redistributed
-in this package. They remain subject to the vendor's applicable license terms.
-
-The packaged executable uses the Microsoft Visual C++ runtime supplied by the
-target Windows installation or Microsoft Visual C++ Redistributable.

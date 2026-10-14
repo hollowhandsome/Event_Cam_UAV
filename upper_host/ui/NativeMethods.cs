@@ -1,16 +1,6 @@
 using System.Runtime.InteropServices;
 
-namespace EventCameraViewer.UI;
-
-internal readonly record struct CameraInfo(
-    string Serial,
-    string Product,
-    string Manufacturer)
-{
-    public string DisplayName => string.IsNullOrWhiteSpace(Product)
-        ? Serial
-        : $"{Product}  [{Serial}]";
-}
+namespace EventCameraUdpViewer.UI;
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal struct EventCoreStatus
@@ -18,9 +8,13 @@ internal struct EventCoreStatus
     public int State;
     public int Width;
     public int Height;
-    public int BiasDiffOff;
-    public int BiasDiffOn;
+    public int ListenPort;
     public ulong TotalEvents;
+    public ulong ReceivedPackets;
+    public ulong LostPackets;
+    public ulong OutOfOrderPackets;
+    public ulong InvalidPackets;
+    public ulong IncompleteWindows;
     public double EventsPerSecond;
     public ulong FrameId;
 }
@@ -28,6 +22,8 @@ internal struct EventCoreStatus
 internal static class NativeMethods
 {
     public const int SlotCount = 20;
+    public const int DisplayModeRaw = 0;
+    public const int DisplayModeFiltered = 1;
     private const string LibraryName = "EventCore.dll";
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
@@ -37,20 +33,9 @@ internal static class NativeMethods
     private static extern void ec_shutdown();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int ec_refresh_cameras(IntPtr buffer, int bufferCapacity);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int ec_start_camera_slot(
-        int slot,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string serial,
-        int biasDiffOff,
-        int biasDiffOn);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern void ec_stop_camera_slot(int slot);
-
-    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern void ec_stop_all_cameras();
+    private static extern int ec_set_network_settings(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string bindAddress,
+        int basePort);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ec_set_display_settings(
@@ -59,7 +44,16 @@ internal static class NativeMethods
         int framesPerSecond);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
-    private static extern int ec_apply_slot_bias(int slot, int biasDiffOff, int biasDiffOn);
+    private static extern int ec_set_slot_display_mode(int slot, int mode);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern int ec_start_udp_slot(int slot);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void ec_stop_udp_slot(int slot);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void ec_stop_all_udp_slots();
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl)]
     private static extern int ec_get_slot_status(int slot, out EventCoreStatus status);
@@ -80,7 +74,7 @@ internal static class NativeMethods
 
     public static void Initialize()
     {
-        if (Marshal.SizeOf<EventCoreStatus>() != 48)
+        if (Marshal.SizeOf<EventCoreStatus>() != 80)
             throw new InvalidOperationException("C# 与 C++ 状态结构体布局不一致。");
         if (ec_initialize() == 0)
             throw new InvalidOperationException(GetLastError());
@@ -88,43 +82,11 @@ internal static class NativeMethods
 
     public static void Shutdown() => ec_shutdown();
 
-    public static IReadOnlyList<CameraInfo> RefreshCameras()
+    public static void SetNetworkSettings(string bindAddress, int basePort)
     {
-        int required = ec_refresh_cameras(IntPtr.Zero, 0);
-        if (required < 0)
+        if (ec_set_network_settings(bindAddress, basePort) == 0)
             throw new InvalidOperationException(GetLastError());
-        if (required <= 1)
-            return [];
-
-        IntPtr buffer = Marshal.AllocHGlobal(required);
-        try
-        {
-            if (ec_refresh_cameras(buffer, required) < 0)
-                throw new InvalidOperationException(GetLastError());
-            string text = Marshal.PtrToStringUTF8(buffer) ?? string.Empty;
-            return text.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                .Select(line => line.Split('\t'))
-                .Where(parts => parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0]))
-                .Select(parts => new CameraInfo(
-                    parts[0],
-                    parts.Length > 1 ? parts[1] : string.Empty,
-                    parts.Length > 2 ? parts[2] : string.Empty))
-                .ToArray();
-        }
-        finally
-        {
-            Marshal.FreeHGlobal(buffer);
-        }
     }
-
-    public static void StartCamera(int slot, string serial, int biasDiffOff, int biasDiffOn)
-    {
-        if (ec_start_camera_slot(slot, serial, biasDiffOff, biasDiffOn) == 0)
-            throw new InvalidOperationException(GetSlotError(slot));
-    }
-
-    public static void StopCamera(int slot) => ec_stop_camera_slot(slot);
-    public static void StopAllCameras() => ec_stop_all_cameras();
 
     public static void SetDisplaySettings(int width, int height, int framesPerSecond)
     {
@@ -132,16 +94,25 @@ internal static class NativeMethods
             throw new InvalidOperationException(GetLastError());
     }
 
-    public static void ApplyBias(int slot, int biasDiffOff, int biasDiffOn)
+    public static void SetSlotDisplayMode(int slot, int mode)
     {
-        if (ec_apply_slot_bias(slot, biasDiffOff, biasDiffOn) == 0)
+        if (ec_set_slot_display_mode(slot, mode) == 0)
+            throw new InvalidOperationException(GetLastError());
+    }
+
+    public static void StartSlot(int slot)
+    {
+        if (ec_start_udp_slot(slot) == 0)
             throw new InvalidOperationException(GetSlotError(slot));
     }
+
+    public static void StopSlot(int slot) => ec_stop_udp_slot(slot);
+    public static void StopAllSlots() => ec_stop_all_udp_slots();
 
     public static EventCoreStatus GetStatus(int slot)
     {
         if (ec_get_slot_status(slot, out EventCoreStatus status) == 0)
-            throw new InvalidOperationException($"无法读取槽位 {slot + 1} 的状态。");
+            throw new InvalidOperationException($"无法读取UDP槽位 {slot + 1} 的状态。");
         return status;
     }
 
@@ -156,19 +127,18 @@ internal static class NativeMethods
 
     public static string GetSlotError(int slot) => ReadNativeString(
         (buffer, capacity) => ec_get_slot_error(slot, buffer, capacity),
-        $"槽位 {slot + 1} 返回了未知错误。");
+        $"UDP槽位 {slot + 1} 返回了未知错误。");
 
     public static string GetLastError() => ReadNativeString(
         ec_get_last_error,
-        "C++ 核心返回了未知错误。");
+        "UDP核心返回了未知错误。");
 
     private static string ReadNativeString(
         Func<IntPtr, int, int> nativeCall,
         string fallback)
     {
         int required = nativeCall(IntPtr.Zero, 0);
-        if (required <= 1)
-            return fallback;
+        if (required <= 1) return fallback;
         IntPtr buffer = Marshal.AllocHGlobal(required);
         try
         {

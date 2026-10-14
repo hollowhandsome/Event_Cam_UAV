@@ -1,0 +1,6 @@
+**/bin/Debug/
+**/obj/
+upper_host/native/build-msvc-opencv/
+upper_host/native/vcpkg_installed/
+__pycache__/
+*.pyc

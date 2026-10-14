@@ -1,29 +1,20 @@
 cmake_minimum_required(VERSION 3.20)
-project(EventCore LANGUAGES CXX)
+project(EventCoreUdp LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS OFF)
 
-set(DVSENSE_SDK_ROOT "C:/Program Files (x86)/DvsenseDriver" CACHE PATH
-    "DVSense SDK installation directory")
 set(EVENTCORE_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/bin" CACHE PATH
     "Directory that receives EventCore.dll")
 
 find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc)
 
-foreach(required_file
-        "${DVSENSE_SDK_ROOT}/include/DvsenseDriver/camera/DvsCameraManager.hpp"
-        "${DVSENSE_SDK_ROOT}/lib/DvsenseBase.lib"
-        "${DVSENSE_SDK_ROOT}/lib/DvsenseHal.lib"
-        "${DVSENSE_SDK_ROOT}/lib/DvsenseDriver.lib")
-    if(NOT EXISTS "${required_file}")
-        message(FATAL_ERROR "Required DVSense SDK file is missing: ${required_file}")
-    endif()
-endforeach()
-
 add_library(EventCore SHARED
     include/EventCoreApi.h
+    src/EventTypes.h
+    src/UevtProtocol.h
+    src/UevtProtocol.cpp
     src/EventFrameRenderer.h
     src/EventFrameRenderer.cpp
     src/EventCore.cpp
@@ -34,16 +25,14 @@ target_compile_definitions(EventCore PRIVATE
     NOMINMAX
     WIN32_LEAN_AND_MEAN
 )
-target_include_directories(EventCore
-    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+target_include_directories(EventCore PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
-target_include_directories(EventCore SYSTEM PRIVATE "${DVSENSE_SDK_ROOT}/include")
 target_link_libraries(EventCore PRIVATE
-    "${DVSENSE_SDK_ROOT}/lib/DvsenseDriver.lib"
-    "${DVSENSE_SDK_ROOT}/lib/DvsenseHal.lib"
-    "${DVSENSE_SDK_ROOT}/lib/DvsenseBase.lib"
     opencv_core
     opencv_imgproc
+    ws2_32
 )
 
 add_custom_command(TARGET EventCore POST_BUILD
@@ -61,6 +50,27 @@ set_target_properties(EventCore PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/lib"
 )
 
+enable_testing()
+add_executable(UevtProtocolTests
+    tests/UevtProtocolTests.cpp
+    src/UevtProtocol.cpp
+)
+target_include_directories(UevtProtocolTests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+add_test(NAME UevtProtocolTests COMMAND UevtProtocolTests)
+
+set(UEVT_V2_DELIVERY_SAMPLES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../event_cam_studio_developer_thor_arm64_v2_20260924/integration/samples/raw/packet_001.bin"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../event_cam_studio_developer_thor_arm64_v2_20260924/integration/samples/raw/packet_002.bin"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../event_cam_studio_developer_thor_arm64_v2_20260924/integration/samples/filtered/packet_001.bin"
+)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../event_cam_studio_developer_thor_arm64_v2_20260924/integration/samples/raw/packet_001.bin")
+    add_test(
+        NAME UevtV2DeliverySamples
+        COMMAND UevtProtocolTests ${UEVT_V2_DELIVERY_SAMPLES}
+    )
+endif()
+
 if(MSVC)
     target_compile_options(EventCore PRIVATE /W4 /permissive- /utf-8 /external:W0)
+    target_compile_options(UevtProtocolTests PRIVATE /W4 /permissive- /utf-8)
 endif()

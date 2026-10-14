@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -7,7 +6,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
-namespace EventCameraViewer.UI;
+namespace EventCameraUdpViewer.UI;
 
 public partial class MainWindow : Window
 {
@@ -21,11 +20,29 @@ public partial class MainWindow : Window
         public string DisplayName => $"{FramesPerSecond} FPS";
     }
 
+    private sealed record DisplayContentOption(int Mode, string DisplayName);
+
+    private sealed class UdpTile
+    {
+        public required int Slot { get; init; }
+        public required string Name { get; init; }
+        public required Border Border { get; init; }
+        public required Image Image { get; init; }
+        public required TextBlock PortText { get; init; }
+        public required TextBlock StatusText { get; init; }
+        public WriteableBitmap? Bitmap { get; set; }
+        public ulong LastFrameId { get; set; } = ulong.MaxValue;
+        public bool Running { get; set; }
+    }
+
     private const int OverviewRowCount = 5;
     private const int OverviewColumnCount = 4;
-    private const int HighResolutionWidth = 1280;
-    private const int HighResolutionHeight = 720;
-    private const int HighFramesPerSecond = 60;
+    private const int CameraCountPerGroup = 2;
+    private const int GroupCount = NativeMethods.SlotCount / CameraCountPerGroup;
+    private const int DefaultBasePort = 50000;
+    private const int DefaultWidth = 1280;
+    private const int DefaultHeight = 720;
+    private const int DefaultFramesPerSecond = 60;
 
     private static readonly ResolutionOption[] ResolutionOptions =
     [
@@ -42,46 +59,43 @@ public partial class MainWindow : Window
         new(60)
     ];
 
-    private sealed class CameraTile
-    {
-        public required int Slot { get; init; }
-        public required string Name { get; init; }
-        public required Border Border { get; init; }
-        public required Image Image { get; init; }
-        public required TextBlock SerialText { get; init; }
-        public required TextBlock StatusText { get; init; }
-        public CameraInfo? Camera { get; set; }
-        public WriteableBitmap? Bitmap { get; set; }
-        public ulong LastFrameId { get; set; }
-        public int BiasOff { get; set; } = 90;
-        public int BiasOn { get; set; } = 45;
-        public bool Running { get; set; }
-    }
+    private static readonly DisplayContentOption[] DisplayContentOptions =
+    [
+        new(NativeMethods.DisplayModeRaw, "原始事件"),
+        new(NativeMethods.DisplayModeFiltered, "滤波事件")
+    ];
 
     private readonly DispatcherTimer _frameTimer;
-    private readonly CameraTile[] _tiles = new CameraTile[NativeMethods.SlotCount];
-    private IReadOnlyList<CameraInfo> _cameras = [];
-    private int _selectedSlot;
-    private int? _focusedSlot;
+    private readonly UdpTile[] _tiles = new UdpTile[NativeMethods.SlotCount];
+    private readonly int[] _slotDisplayModes = new int[NativeMethods.SlotCount];
     private bool _nativeInitialized;
     private bool _busy;
-    private bool _updatingControls;
     private bool _updatingDisplaySettings;
-    private int _previewWidth = HighResolutionWidth;
-    private int _previewHeight = HighResolutionHeight;
-    private int _targetFramesPerSecond = HighFramesPerSecond;
+    private bool _updatingDisplayContent;
+    private int _selectedSlot;
+    private int? _focusedSlot;
+    private string _bindAddress = "0.0.0.0";
+    private int _basePort = DefaultBasePort;
+    private int _previewWidth = DefaultWidth;
+    private int _previewHeight = DefaultHeight;
+    private int _targetFramesPerSecond = DefaultFramesPerSecond;
 
     public MainWindow()
     {
         InitializeComponent();
+        CreateUdpTiles();
+
         ResolutionComboBox.ItemsSource = ResolutionOptions;
         FrameRateComboBox.ItemsSource = FrameRateOptions;
         UpdateDisplaySettingControls();
-        CreateCameraTiles();
+
         SlotComboBox.ItemsSource = Enumerable.Range(0, NativeMethods.SlotCount)
             .Select(GetSlotName)
             .ToArray();
+        DisplayContentComboBox.ItemsSource = DisplayContentOptions;
         SlotComboBox.SelectedIndex = 0;
+        UpdateDisplayContentControl();
+        UpdatePortLabels();
 
         _frameTimer = new DispatcherTimer(DispatcherPriority.Render)
         {
@@ -89,59 +103,56 @@ public partial class MainWindow : Window
         };
         _frameTimer.Tick += FrameTimer_Tick;
         Loaded += MainWindow_Loaded;
-        Closing += MainWindow_Closing;
     }
 
-    private static string GetSlotName(int slot) =>
-        $"第 {slot / 2 + 1} 组 - {(slot % 2 == 0 ? "宽视场" : "窄视场")}";
-
-    private void CreateCameraTiles()
+    private void CreateUdpTiles()
     {
-        for (int row = 0; row < OverviewRowCount; row++)
-            OverviewGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        for (int column = 0; column < OverviewColumnCount; column++)
-            OverviewGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        for (int row = 0; row < OverviewRowCount; ++row)
+            OverviewGrid.RowDefinitions.Add(new RowDefinition());
+        for (int column = 0; column < OverviewColumnCount; ++column)
+            OverviewGrid.ColumnDefinitions.Add(new ColumnDefinition());
 
-        for (int slot = 0; slot < NativeMethods.SlotCount; slot++)
+        for (int slot = 0; slot < NativeMethods.SlotCount; ++slot)
         {
-            var image = new Image { Stretch = Stretch.Uniform };
+            var image = new Image
+            {
+                Stretch = Stretch.Uniform,
+                SnapsToDevicePixels = true
+            };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
-            var title = new TextBlock
+
+            var name = new TextBlock
             {
                 Text = GetSlotName(slot),
-                Foreground = Brushes.White,
                 FontWeight = FontWeights.SemiBold,
-                Margin = new Thickness(5, 2, 5, 0)
+                Foreground = Brushes.White,
+                Margin = new Thickness(5, 2, 5, 2)
             };
-            var serial = new TextBlock
+            var port = new TextBlock
             {
-                Text = "未分配",
-                Foreground = new SolidColorBrush(Color.FromRgb(155, 164, 176)),
-                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(145, 160, 180)),
                 HorizontalAlignment = HorizontalAlignment.Right,
-                Margin = new Thickness(5, 3, 5, 0),
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxWidth = 240
+                Margin = new Thickness(5, 2, 5, 2)
             };
             var status = new TextBlock
             {
-                Text = "● 未启动",
-                Foreground = Brushes.Gold,
-                FontSize = 11,
-                Margin = new Thickness(5, 0, 5, 2),
+                Text = "● 未监听",
+                Foreground = Brushes.Gray,
+                Margin = new Thickness(5, 2, 5, 2),
                 VerticalAlignment = VerticalAlignment.Bottom
             };
-            var overlay = new Grid { Background = Brushes.Transparent };
-            overlay.ColumnDefinitions.Add(new ColumnDefinition());
-            overlay.ColumnDefinitions.Add(new ColumnDefinition());
-            Grid.SetColumn(title, 0);
-            Grid.SetColumn(serial, 1);
-            overlay.Children.Add(title);
-            overlay.Children.Add(serial);
+
+            var top = new Grid
+            {
+                Background = new SolidColorBrush(Color.FromArgb(180, 16, 19, 24)),
+                VerticalAlignment = VerticalAlignment.Top
+            };
+            top.Children.Add(name);
+            top.Children.Add(port);
 
             var content = new Grid { Background = new SolidColorBrush(Color.FromRgb(28, 28, 28)) };
             content.Children.Add(image);
-            content.Children.Add(overlay);
+            content.Children.Add(top);
             content.Children.Add(status);
 
             var border = new Border
@@ -151,25 +162,24 @@ public partial class MainWindow : Window
                 BorderBrush = new SolidColorBrush(Color.FromRgb(59, 65, 75)),
                 Background = new SolidColorBrush(Color.FromRgb(28, 28, 28)),
                 Child = content,
-                Tag = slot,
                 Cursor = Cursors.Hand
             };
-            border.MouseLeftButtonDown += CameraTile_MouseLeftButtonDown;
+            int capturedSlot = slot;
+            border.MouseLeftButtonUp += (_, _) => ToggleFocus(capturedSlot);
             Grid.SetRow(border, slot / OverviewColumnCount);
             Grid.SetColumn(border, slot % OverviewColumnCount);
             OverviewGrid.Children.Add(border);
 
-            _tiles[slot] = new CameraTile
+            _tiles[slot] = new UdpTile
             {
                 Slot = slot,
                 Name = GetSlotName(slot),
                 Border = border,
                 Image = image,
-                SerialText = serial,
+                PortText = port,
                 StatusText = status
             };
         }
-        UpdateSelectionVisuals();
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -177,20 +187,23 @@ public partial class MainWindow : Window
         try
         {
             NativeMethods.Initialize();
+            NativeMethods.SetNetworkSettings(_bindAddress, _basePort);
             NativeMethods.SetDisplaySettings(
                 _previewWidth, _previewHeight, _targetFramesPerSecond);
             _nativeInitialized = true;
-            MessageTextBlock.Text = "C++ 多相机数据核心初始化成功。";
             _frameTimer.Start();
-            await RefreshCamerasAsync();
+            MessageTextBlock.Text =
+                "UDP核心初始化成功。设置发送端目标IP后，单击“全部监听”即可接收。";
+            UpdateControlAvailability();
+            await Task.CompletedTask;
         }
         catch (DllNotFoundException)
         {
-            ShowFatal("未找到 EventCore.dll 或 DVSense SDK 运行库。请先运行构建脚本，并确认 SDK 已安装。");
+            ShowFatal("没有找到 EventCore.dll。请先运行“构建_UDP上位机.cmd”。");
         }
         catch (BadImageFormatException)
         {
-            ShowFatal("C# UI 与 C++ 核心位数不一致，必须都使用 x64 版本。");
+            ShowFatal("C#界面与C++核心位数不一致，必须都使用x64版本。");
         }
         catch (Exception error)
         {
@@ -198,8 +211,118 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void RefreshButton_Click(object sender, RoutedEventArgs e) =>
-        await RefreshCamerasAsync();
+    private void ApplyNetworkButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_nativeInitialized || _busy) return;
+        if (_tiles.Any(tile => tile.Running))
+        {
+            ShowError("请先停止全部UDP槽位，再修改绑定地址或端口。");
+            return;
+        }
+        string address = BindAddressTextBox.Text.Trim();
+        if (!int.TryParse(BasePortTextBox.Text.Trim(), out int basePort) ||
+            basePort <= 0 || basePort + GroupCount - 1 > 65535)
+        {
+            ShowError("起始端口必须保证10个连续分组端口都处于1～65535范围内。");
+            return;
+        }
+        try
+        {
+            NativeMethods.SetNetworkSettings(address, basePort);
+            _bindAddress = address;
+            _basePort = basePort;
+            UpdatePortLabels();
+            MessageTextBlock.Text =
+                $"UEVT V2映射已更新：{address}:{basePort}～{basePort + GroupCount - 1}，每端口按camera_id分两路。";
+        }
+        catch (Exception error)
+        {
+            ShowError(error.Message);
+        }
+    }
+
+    private async void StartAllButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_nativeInitialized || _busy) return;
+        SetBusy(true, "正在绑定10个UEVT V2分组端口…");
+        try
+        {
+            List<string> errors = await Task.Run(() =>
+            {
+                var result = new List<string>();
+                for (int slot = 0; slot < NativeMethods.SlotCount; ++slot)
+                {
+                    try { NativeMethods.StartSlot(slot); }
+                    catch (Exception error) { result.Add($"{GetSlotName(slot)}：{error.Message}"); }
+                }
+                return result;
+            });
+            RefreshRunningStates();
+            MessageTextBlock.Text = errors.Count == 0
+                ? $"已监听UEVT V2端口 {_basePort}～{_basePort + GroupCount - 1}。"
+                : $"已启动部分UDP槽位；{errors.Count}路失败。";
+            if (errors.Count > 0) ShowError(string.Join(Environment.NewLine, errors));
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    private async void StopAllButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_nativeInitialized || _busy) return;
+        SetBusy(true, "正在停止全部UDP监听…");
+        try
+        {
+            await Task.Run(NativeMethods.StopAllSlots);
+            foreach (UdpTile tile in _tiles) SetTileStopped(tile);
+            MessageTextBlock.Text = "全部UDP槽位已停止。";
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    private async void StartSelectedButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_nativeInitialized || _busy) return;
+        UdpTile tile = _tiles[_selectedSlot];
+        SetBusy(true, $"正在监听 {tile.Name} 的UDP端口…");
+        try
+        {
+            await Task.Run(() => NativeMethods.StartSlot(tile.Slot));
+            tile.Running = true;
+            MessageTextBlock.Text =
+                $"{tile.Name} 正在监听 UDP {_basePort + tile.Slot / CameraCountPerGroup}，camera_id={tile.Slot % CameraCountPerGroup + 1}。";
+        }
+        catch (Exception error)
+        {
+            ShowError(error.Message);
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
+
+    private async void StopSelectedButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_nativeInitialized || _busy) return;
+        UdpTile tile = _tiles[_selectedSlot];
+        SetBusy(true, $"正在停止 {tile.Name}…");
+        try
+        {
+            await Task.Run(() => NativeMethods.StopSlot(tile.Slot));
+            SetTileStopped(tile);
+            MessageTextBlock.Text = $"{tile.Name} 已停止监听。";
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
 
     private void DisplaySettingsComboBox_SelectionChanged(
         object sender,
@@ -207,34 +330,20 @@ public partial class MainWindow : Window
     {
         if (_updatingDisplaySettings || !_nativeInitialized || _busy) return;
         if (ResolutionComboBox.SelectedItem is not ResolutionOption resolution ||
-            FrameRateComboBox.SelectedItem is not FrameRateOption frameRate)
-            return;
-        ApplyDisplaySettings(
-            resolution.Width,
-            resolution.Height,
-            frameRate.FramesPerSecond);
-    }
+            FrameRateComboBox.SelectedItem is not FrameRateOption frameRate) return;
 
-    private void ApplyDisplaySettings(int width, int height, int framesPerSecond)
-    {
-        if (!_nativeInitialized || _busy) return;
         try
         {
-            NativeMethods.SetDisplaySettings(width, height, framesPerSecond);
-            _previewWidth = width;
-            _previewHeight = height;
-            _targetFramesPerSecond = framesPerSecond;
-            _frameTimer.Interval = TimeSpan.FromSeconds(1.0 / framesPerSecond);
-            foreach (CameraTile tile in _tiles)
-            {
-                tile.LastFrameId = ulong.MaxValue;
-                tile.Bitmap = null;
-                tile.Image.Source = null;
-            }
+            NativeMethods.SetDisplaySettings(
+                resolution.Width, resolution.Height, frameRate.FramesPerSecond);
+            _previewWidth = resolution.Width;
+            _previewHeight = resolution.Height;
+            _targetFramesPerSecond = frameRate.FramesPerSecond;
+            _frameTimer.Interval = TimeSpan.FromSeconds(1.0 / _targetFramesPerSecond);
+            foreach (UdpTile tile in _tiles) ClearTileFrame(tile);
             FocusImage.Source = null;
-            UpdateDisplaySettingControls();
             MessageTextBlock.Text =
-                $"显示设置已切换为 {width}×{height}，{framesPerSecond} FPS。";
+                $"显示设置已切换为 {_previewWidth}×{_previewHeight}，{_targetFramesPerSecond} FPS。";
         }
         catch (Exception error)
         {
@@ -253,442 +362,246 @@ public partial class MainWindow : Window
         _updatingDisplaySettings = false;
     }
 
-    private async Task RefreshCamerasAsync()
-    {
-        if (!_nativeInitialized || _busy) return;
-        if (_tiles.Any(tile => tile.Running))
-        {
-            ShowError("请先停止全部相机，再刷新相机列表。");
-            return;
-        }
-
-        SetBusy(true, "正在搜索相机并分配到 20 个槽位…");
-        try
-        {
-            _cameras = await Task.Run(NativeMethods.RefreshCameras);
-            CameraComboBox.ItemsSource = _cameras;
-
-            var availableBySerial = _cameras.ToDictionary(camera => camera.Serial);
-            var used = new HashSet<string>();
-            foreach (CameraTile tile in _tiles)
-            {
-                if (tile.Camera is CameraInfo old &&
-                    availableBySerial.TryGetValue(old.Serial, out CameraInfo current))
-                {
-                    tile.Camera = current;
-                    used.Add(current.Serial);
-                }
-                else
-                {
-                    tile.Camera = null;
-                }
-            }
-            foreach (CameraTile tile in _tiles.Where(tile => tile.Camera is null))
-            {
-                CameraInfo? next = _cameras
-                    .Where(camera => !used.Contains(camera.Serial))
-                    .Select(camera => (CameraInfo?)camera)
-                    .FirstOrDefault();
-                if (next.HasValue)
-                {
-                    tile.Camera = next.Value;
-                    used.Add(next.Value.Serial);
-                }
-            }
-            foreach (CameraTile tile in _tiles) UpdateTileAssignment(tile);
-            LoadSelectedSlotIntoControls();
-            CameraCountTextBlock.Text = $"已发现：{_cameras.Count} / 20";
-            MessageTextBlock.Text = _cameras.Count == 0
-                ? "未发现相机：检查连接，并关闭其他占用相机的软件。"
-                : $"发现 {_cameras.Count} 台相机，已按检测顺序分配；请核对宽/窄视场对应关系。";
-        }
-        catch (Exception error)
-        {
-            ShowError(error.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
-    private async void StartAllButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (!ValidateUniqueAssignments()) return;
-        CameraTile[] assigned = _tiles.Where(tile => tile.Camera.HasValue).ToArray();
-        if (assigned.Length == 0)
-        {
-            ShowError("当前没有已分配的相机，请先刷新相机列表。");
-            return;
-        }
-        SaveBiasForSelectedSlot();
-        SetBusy(true, $"正在依次启动 {assigned.Length} 台相机…");
-        try
-        {
-            List<string> errors = await Task.Run(() =>
-            {
-                var result = new List<string>();
-                foreach (CameraTile tile in assigned)
-                {
-                    try
-                    {
-                        NativeMethods.StartCamera(
-                            tile.Slot, tile.Camera!.Value.Serial, tile.BiasOff, tile.BiasOn);
-                    }
-                    catch (Exception error)
-                    {
-                        result.Add($"{tile.Name}: {error.Message}");
-                    }
-                }
-                return result;
-            });
-            MessageTextBlock.Text = errors.Count == 0
-                ? $"已启动 {assigned.Length} 台相机。"
-                : $"已完成启动，其中 {errors.Count} 路失败；其他相机继续运行。";
-            if (errors.Count > 0)
-                MessageBox.Show(this, string.Join(Environment.NewLine, errors),
-                    "部分相机启动失败", MessageBoxButton.OK, MessageBoxImage.Warning);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
-    private async void StopAllButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (!_nativeInitialized || _busy) return;
-        SetBusy(true, "正在停止全部相机…");
-        try
-        {
-            await Task.Run(NativeMethods.StopAllCameras);
-            MessageTextBlock.Text = "全部相机已停止。";
-        }
-        catch (Exception error)
-        {
-            ShowError(error.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
-    private async void StartSelectedButton_Click(object sender, RoutedEventArgs e)
-    {
-        CameraTile tile = _tiles[_selectedSlot];
-        if (!tile.Camera.HasValue)
-        {
-            ShowError("当前槽位未分配相机。");
-            return;
-        }
-        if (!TryReadBias(out int off, out int on)) return;
-        CameraTile? conflict = _tiles.FirstOrDefault(other =>
-            other.Slot != tile.Slot && other.Running && other.Camera?.Serial == tile.Camera?.Serial);
-        if (conflict is not null)
-        {
-            ShowError($"该序列号正在 {conflict.Name} 中运行。");
-            return;
-        }
-        tile.BiasOff = off;
-        tile.BiasOn = on;
-        SetBusy(true, $"正在启动 {tile.Name}…");
-        try
-        {
-            await Task.Run(() => NativeMethods.StartCamera(
-                tile.Slot, tile.Camera.Value.Serial, off, on));
-            tile.LastFrameId = 0;
-            MessageTextBlock.Text = $"{tile.Name} 已启动。";
-        }
-        catch (Exception error)
-        {
-            ShowError(error.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
-    private async void StopSelectedButton_Click(object sender, RoutedEventArgs e)
-    {
-        CameraTile tile = _tiles[_selectedSlot];
-        SetBusy(true, $"正在停止 {tile.Name}…");
-        try
-        {
-            await Task.Run(() => NativeMethods.StopCamera(tile.Slot));
-            MessageTextBlock.Text = $"{tile.Name} 已停止。";
-        }
-        catch (Exception error)
-        {
-            ShowError(error.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
-    private async void ApplyBiasButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (!TryReadBias(out int off, out int on)) return;
-        CameraTile tile = _tiles[_selectedSlot];
-        tile.BiasOff = off;
-        tile.BiasOn = on;
-        if (!tile.Running)
-        {
-            MessageTextBlock.Text = $"{tile.Name} 的 Bias 已保存，将在启动时应用。";
-            return;
-        }
-        SetBusy(true, $"正在应用 {tile.Name} 的 Bias…");
-        try
-        {
-            await Task.Run(() => NativeMethods.ApplyBias(tile.Slot, off, on));
-            EventCoreStatus status = NativeMethods.GetStatus(tile.Slot);
-            tile.BiasOff = status.BiasDiffOff;
-            tile.BiasOn = status.BiasDiffOn;
-            LoadSelectedSlotIntoControls();
-            MessageTextBlock.Text =
-                $"{tile.Name} Bias 已应用并回读：off={status.BiasDiffOff}, on={status.BiasDiffOn}。";
-        }
-        catch (Exception error)
-        {
-            ShowError(error.Message);
-        }
-        finally
-        {
-            SetBusy(false);
-        }
-    }
-
     private void FrameTimer_Tick(object? sender, EventArgs e)
     {
-        if (!_nativeInitialized || _busy) return;
-        try
+        if (!_nativeInitialized) return;
+        int runningCount = 0;
+        ulong totalPackets = 0;
+        ulong totalLost = 0;
+
+        foreach (UdpTile tile in _tiles)
         {
-            int runningCount = 0;
-            foreach (CameraTile tile in _tiles)
+            try
             {
                 EventCoreStatus status = NativeMethods.GetStatus(tile.Slot);
-                tile.Running = status.State == 1;
+                tile.Running = status.State != 0;
                 if (!tile.Running)
                 {
-                    tile.StatusText.Text = tile.Camera.HasValue ? "● 未启动" : "● 未分配";
-                    tile.StatusText.Foreground = tile.Camera.HasValue ? Brushes.Gold : Brushes.Gray;
+                    tile.StatusText.Text = "● 未监听";
+                    tile.StatusText.Foreground = Brushes.Gray;
                     continue;
                 }
-                runningCount++;
-                tile.StatusText.Text = $"● 运行  {status.EventsPerSecond / 1_000_000.0:F2} Mev/s";
-                tile.StatusText.Foreground = Brushes.LightGreen;
-                if (status.FrameId == tile.LastFrameId) continue;
-                EnsureBitmap(tile, status.Width, status.Height);
-                WriteableBitmap bitmap = tile.Bitmap!;
-                bitmap.Lock();
-                try
-                {
-                    int capacity = checked(bitmap.BackBufferStride * bitmap.PixelHeight);
-                    if (NativeMethods.CopyLatestFrame(
-                        tile.Slot, bitmap.BackBuffer, capacity, bitmap.BackBufferStride,
-                        out ulong copiedFrameId))
-                    {
-                        bitmap.AddDirtyRect(new Int32Rect(
-                            0, 0, bitmap.PixelWidth, bitmap.PixelHeight));
-                        tile.LastFrameId = copiedFrameId;
-                    }
-                }
-                finally
-                {
-                    bitmap.Unlock();
-                }
+
+                ++runningCount;
+                totalPackets += status.ReceivedPackets;
+                totalLost += status.LostPackets;
+                tile.StatusText.Text = status.ReceivedPackets == 0
+                    ? "● 监听中 · 等待数据"
+                    : $"● {status.EventsPerSecond / 1_000_000.0:F2} Mev/s  丢:{status.LostPackets}";
+                tile.StatusText.Foreground = status.InvalidPackets == 0
+                    ? Brushes.LightGreen
+                    : Brushes.Orange;
+
+                if (status.FrameId != tile.LastFrameId)
+                    CopyFrame(tile, status);
             }
-            RunningCountTextBlock.Text = $"运行：{runningCount} / 20";
-            UpdateSelectedStatus();
-            UpdateControlAvailability();
+            catch (Exception error)
+            {
+                tile.StatusText.Text = "● 接收错误";
+                tile.StatusText.Foreground = Brushes.OrangeRed;
+                if (tile.Slot == _selectedSlot) MessageTextBlock.Text = error.Message;
+            }
         }
-        catch (Exception error)
+
+        RunningCountTextBlock.Text = $"监听：{runningCount} / {NativeMethods.SlotCount}";
+        HeaderStatusTextBlock.Text =
+            $"运行 {runningCount}/20 · 收包 {totalPackets:N0} · 丢包 {totalLost:N0}";
+        UpdateSelectedStatus();
+        UpdateControlAvailability();
+    }
+
+    private void CopyFrame(UdpTile tile, EventCoreStatus status)
+    {
+        if (status.Width <= 0 || status.Height <= 0) return;
+        if (tile.Bitmap is null || tile.Bitmap.PixelWidth != status.Width ||
+            tile.Bitmap.PixelHeight != status.Height)
         {
-            _frameTimer.Stop();
-            ShowError(error.Message);
+            tile.Bitmap = new WriteableBitmap(
+                status.Width, status.Height, 96, 96, PixelFormats.Bgr24, null);
+            tile.Image.Source = tile.Bitmap;
         }
-    }
 
-    private void EnsureBitmap(CameraTile tile, int width, int height)
-    {
-        if (tile.Bitmap?.PixelWidth == width && tile.Bitmap.PixelHeight == height) return;
-        tile.Bitmap = new WriteableBitmap(width, height, 96, 96, PixelFormats.Bgr24, null);
-        tile.Image.Source = tile.Bitmap;
-        if (_focusedSlot == tile.Slot) FocusImage.Source = tile.Bitmap;
-    }
-
-    private void CameraTile_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is not Border { Tag: int slot }) return;
-        SelectSlot(slot);
-        ShowFocusedSlot(slot);
-    }
-
-    private void ShowFocusedSlot(int slot)
-    {
-        _focusedSlot = slot;
-        CameraTile tile = _tiles[slot];
-        FocusTitleTextBlock.Text = $"{tile.Name}    {tile.Camera?.Serial ?? "未分配"}";
-        FocusImage.Source = tile.Bitmap;
-        Grid.SetRowSpan(MainLayout, 2);
-        StatusBar.Visibility = Visibility.Collapsed;
-        FocusView.Visibility = Visibility.Visible;
-    }
-
-    private void ReturnToOverview()
-    {
-        _focusedSlot = null;
-        FocusImage.Source = null;
-        FocusView.Visibility = Visibility.Collapsed;
-        Grid.SetRowSpan(MainLayout, 1);
-        StatusBar.Visibility = Visibility.Visible;
-    }
-
-    private void FocusImage_MouseLeftButtonDown(object sender, MouseButtonEventArgs e) =>
-        ReturnToOverview();
-    private void BackToOverviewButton_Click(object sender, RoutedEventArgs e) =>
-        ReturnToOverview();
-    private void MainWindow_PreviewKeyDown(object sender, KeyEventArgs e)
-    {
-        if (e.Key == Key.Escape && _focusedSlot.HasValue)
+        tile.Bitmap.Lock();
+        try
         {
-            ReturnToOverview();
-            e.Handled = true;
+            int capacity = tile.Bitmap.BackBufferStride * tile.Bitmap.PixelHeight;
+            if (!NativeMethods.CopyLatestFrame(
+                    tile.Slot,
+                    tile.Bitmap.BackBuffer,
+                    capacity,
+                    tile.Bitmap.BackBufferStride,
+                    out ulong frameId)) return;
+            tile.Bitmap.AddDirtyRect(new Int32Rect(
+                0, 0, tile.Bitmap.PixelWidth, tile.Bitmap.PixelHeight));
+            tile.LastFrameId = frameId;
+            if (_focusedSlot == tile.Slot) FocusImage.Source = tile.Bitmap;
+        }
+        finally
+        {
+            tile.Bitmap.Unlock();
         }
     }
 
     private void SlotComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_updatingControls || SlotComboBox.SelectedIndex < 0) return;
+        if (SlotComboBox.SelectedIndex < 0) return;
         SelectSlot(SlotComboBox.SelectedIndex);
+    }
+
+    private void DisplayContentComboBox_SelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (_updatingDisplayContent || !_nativeInitialized || _busy) return;
+        if (DisplayContentComboBox.SelectedItem is not DisplayContentOption option) return;
+
+        int previousMode = _slotDisplayModes[_selectedSlot];
+        try
+        {
+            NativeMethods.SetSlotDisplayMode(_selectedSlot, option.Mode);
+            _slotDisplayModes[_selectedSlot] = option.Mode;
+            ClearTileFrame(_tiles[_selectedSlot]);
+            if (_focusedSlot == _selectedSlot) FocusImage.Source = null;
+            MessageTextBlock.Text = option.Mode == NativeMethods.DisplayModeRaw
+                ? $"{_tiles[_selectedSlot].Name} 已切换为原始事件。若 Jetson 只发送滤波事件，原始事件无法在本机恢复。"
+                : $"{_tiles[_selectedSlot].Name} 已切换为滤波事件；若收到原始流，本机仅显示 drone 框内事件。";
+        }
+        catch (Exception error)
+        {
+            _slotDisplayModes[_selectedSlot] = previousMode;
+            UpdateDisplayContentControl();
+            ShowError(error.Message);
+        }
+    }
+
+    private void UpdateDisplayContentControl()
+    {
+        _updatingDisplayContent = true;
+        DisplayContentComboBox.SelectedItem = DisplayContentOptions.First(option =>
+            option.Mode == _slotDisplayModes[_selectedSlot]);
+        _updatingDisplayContent = false;
     }
 
     private void SelectSlot(int slot)
     {
-        SaveBiasForSelectedSlot();
         _selectedSlot = slot;
-        _updatingControls = true;
-        SlotComboBox.SelectedIndex = slot;
-        _updatingControls = false;
-        LoadSelectedSlotIntoControls();
-        UpdateSelectionVisuals();
-    }
-
-    private void CameraComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_updatingControls) return;
-        CameraTile tile = _tiles[_selectedSlot];
-        if (tile.Running)
+        for (int index = 0; index < _tiles.Length; ++index)
         {
-            LoadSelectedSlotIntoControls();
-            ShowError("请先停止当前槽位，再更改相机分配。");
-            return;
+            _tiles[index].Border.BorderBrush = index == slot
+                ? Brushes.DodgerBlue
+                : new SolidColorBrush(Color.FromRgb(59, 65, 75));
         }
-        tile.Camera = CameraComboBox.SelectedItem is CameraInfo camera ? camera : null;
-        UpdateTileAssignment(tile);
-    }
-
-    private void ClearAssignmentButton_Click(object sender, RoutedEventArgs e)
-    {
-        CameraTile tile = _tiles[_selectedSlot];
-        if (tile.Running)
-        {
-            ShowError("请先停止当前槽位，再清除分配。");
-            return;
-        }
-        tile.Camera = null;
-        UpdateTileAssignment(tile);
-        LoadSelectedSlotIntoControls();
-    }
-
-    private void LoadSelectedSlotIntoControls()
-    {
-        CameraTile tile = _tiles[_selectedSlot];
-        _updatingControls = true;
-        CameraComboBox.SelectedItem = tile.Camera.HasValue
-            ? _cameras.FirstOrDefault(camera => camera.Serial == tile.Camera.Value.Serial)
-            : null;
-        BiasOffTextBox.Text = tile.BiasOff.ToString(CultureInfo.InvariantCulture);
-        BiasOnTextBox.Text = tile.BiasOn.ToString(CultureInfo.InvariantCulture);
-        _updatingControls = false;
+        if (SlotComboBox.SelectedIndex != slot) SlotComboBox.SelectedIndex = slot;
+        UpdateDisplayContentControl();
+        CurrentPortTextBlock.Text =
+            $"UDP {_bindAddress}:{_basePort + _selectedSlot / CameraCountPerGroup} · camera_id={_selectedSlot % CameraCountPerGroup + 1}";
         UpdateSelectedStatus();
         UpdateControlAvailability();
     }
 
-    private void SaveBiasForSelectedSlot()
+    private void ToggleFocus(int slot)
     {
-        if (_tiles[_selectedSlot] is not CameraTile tile) return;
-        if (int.TryParse(BiasOffTextBox.Text, NumberStyles.Integer,
-                CultureInfo.InvariantCulture, out int off) && off >= 0)
-            tile.BiasOff = off;
-        if (int.TryParse(BiasOnTextBox.Text, NumberStyles.Integer,
-                CultureInfo.InvariantCulture, out int on) && on >= 0)
-            tile.BiasOn = on;
-    }
-
-    private void UpdateTileAssignment(CameraTile tile)
-    {
-        tile.SerialText.Text = tile.Camera?.Serial ?? "未分配";
-        if (!tile.Running)
+        SelectSlot(slot);
+        if (_focusedSlot == slot)
         {
-            tile.StatusText.Text = tile.Camera.HasValue ? "● 未启动" : "● 未分配";
-            tile.StatusText.Foreground = tile.Camera.HasValue ? Brushes.Gold : Brushes.Gray;
+            ExitFocusMode();
+            return;
         }
+        _focusedSlot = slot;
+        OverviewGrid.Visibility = Visibility.Collapsed;
+        FocusBorder.Visibility = Visibility.Visible;
+        FocusTitleTextBlock.Text =
+            $"{_tiles[slot].Name} · UDP {_basePort + slot / CameraCountPerGroup} · camera_id={slot % CameraCountPerGroup + 1}";
+        FocusImage.Source = _tiles[slot].Bitmap;
     }
 
-    private void UpdateSelectionVisuals()
+    private void FocusBorder_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) =>
+        ExitFocusMode();
+
+    private void ExitFocusMode()
     {
-        foreach (CameraTile tile in _tiles)
+        _focusedSlot = null;
+        FocusImage.Source = null;
+        FocusBorder.Visibility = Visibility.Collapsed;
+        OverviewGrid.Visibility = Visibility.Visible;
+    }
+
+    private void MainWindow_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && _focusedSlot.HasValue)
         {
-            tile.Border.BorderBrush = tile.Slot == _selectedSlot
-                ? new SolidColorBrush(Color.FromRgb(46, 120, 210))
-                : new SolidColorBrush(Color.FromRgb(59, 65, 75));
-            tile.Border.BorderThickness = tile.Slot == _selectedSlot
-                ? new Thickness(2)
-                : new Thickness(1);
+            ExitFocusMode();
+            e.Handled = true;
         }
     }
 
     private void UpdateSelectedStatus()
     {
-        if (!_nativeInitialized) return;
-        CameraTile tile = _tiles[_selectedSlot];
-        EventCoreStatus status = NativeMethods.GetStatus(tile.Slot);
-        StateTextBlock.Text = status.State == 1 ? "运行中" : "未启动";
-        StateTextBlock.Foreground = status.State == 1 ? Brushes.LightGreen : Brushes.Gold;
-        SerialTextBlock.Text = $"序列号：{tile.Camera?.Serial ?? "未分配"}";
-        EventRateTextBlock.Text = $"事件率：{status.EventsPerSecond:N0} events/s";
-        TotalEventsTextBlock.Text = $"累计事件：{status.TotalEvents:N0}";
-        FrameIdTextBlock.Text = $"画面编号：{status.FrameId:N0}";
-    }
-
-    private bool ValidateUniqueAssignments()
-    {
-        string[] duplicates = _tiles.Where(tile => tile.Camera.HasValue)
-            .GroupBy(tile => tile.Camera!.Value.Serial)
-            .Where(group => group.Count() > 1)
-            .Select(group => group.Key)
-            .ToArray();
-        if (duplicates.Length == 0) return true;
-        ShowError("以下相机被重复分配到多个槽位：" + string.Join("、", duplicates));
-        return false;
-    }
-
-    private bool TryReadBias(out int biasOff, out int biasOn)
-    {
-        bool offValid = int.TryParse(BiasOffTextBox.Text, NumberStyles.Integer,
-            CultureInfo.InvariantCulture, out biasOff);
-        bool onValid = int.TryParse(BiasOnTextBox.Text, NumberStyles.Integer,
-            CultureInfo.InvariantCulture, out biasOn);
-        if (!offValid || biasOff < 0 || !onValid || biasOn < 0)
+        if (!_nativeInitialized)
         {
-            ShowError("Bias 必须是非负整数。");
-            return false;
+            SelectedStatusTextBlock.Text = "UDP核心尚未初始化";
+            return;
         }
-        return true;
+        try
+        {
+            EventCoreStatus status = NativeMethods.GetStatus(_selectedSlot);
+            double denominator = status.ReceivedPackets + status.LostPackets;
+            double lossPercent = denominator > 0
+                ? status.LostPackets * 100.0 / denominator
+                : 0.0;
+            SelectedStatusTextBlock.Text =
+                $"{(status.State != 0 ? "监听中" : "未监听")}\n" +
+                $"端口: {status.ListenPort}\n" +
+                $"事件率: {status.EventsPerSecond:N0} event/s\n" +
+                $"累计事件: {status.TotalEvents:N0}\n" +
+                $"接收包: {status.ReceivedPackets:N0}\n" +
+                $"估算丢包: {status.LostPackets:N0} ({lossPercent:F2}%)\n" +
+                $"乱序/重复: {status.OutOfOrderPackets:N0}\n" +
+                $"无效包: {status.InvalidPackets:N0}\n" +
+                $"未完成窗口: {status.IncompleteWindows:N0}\n" +
+                $"画面编号: {status.FrameId:N0}";
+        }
+        catch (Exception error)
+        {
+            SelectedStatusTextBlock.Text = error.Message;
+        }
+    }
+
+    private void UpdatePortLabels()
+    {
+        foreach (UdpTile tile in _tiles)
+            tile.PortText.Text =
+                $":{_basePort + tile.Slot / CameraCountPerGroup} · ID{tile.Slot % CameraCountPerGroup + 1}";
+        CurrentPortTextBlock.Text =
+            $"UDP {_bindAddress}:{_basePort + _selectedSlot / CameraCountPerGroup} · camera_id={_selectedSlot % CameraCountPerGroup + 1}";
+    }
+
+    private void RefreshRunningStates()
+    {
+        foreach (UdpTile tile in _tiles)
+            tile.Running = NativeMethods.GetStatus(tile.Slot).State != 0;
+    }
+
+    private static string GetSlotName(int slot)
+    {
+        int group = slot / 2 + 1;
+        string fieldOfView = slot % 2 == 0 ? "宽视场" : "窄视场";
+        return $"第 {group} 组 - {fieldOfView}";
+    }
+
+    private static void ClearTileFrame(UdpTile tile)
+    {
+        tile.LastFrameId = ulong.MaxValue;
+        tile.Bitmap = null;
+        tile.Image.Source = null;
+    }
+
+    private static void SetTileStopped(UdpTile tile)
+    {
+        tile.Running = false;
+        tile.StatusText.Text = "● 未监听";
+        tile.StatusText.Foreground = Brushes.Gray;
+        ClearTileFrame(tile);
     }
 
     private void SetBusy(bool busy, string? message = null)
@@ -700,41 +613,33 @@ public partial class MainWindow : Window
 
     private void UpdateControlAvailability()
     {
-        if (!_nativeInitialized || _busy)
-        {
-            RefreshButton.IsEnabled = false;
-            StartAllButton.IsEnabled = false;
-            StopAllButton.IsEnabled = false;
-            StartSelectedButton.IsEnabled = false;
-            StopSelectedButton.IsEnabled = false;
-            ApplyBiasButton.IsEnabled = false;
-            ResolutionComboBox.IsEnabled = false;
-            FrameRateComboBox.IsEnabled = false;
-            return;
-        }
-        CameraTile selected = _tiles[_selectedSlot];
         bool anyRunning = _tiles.Any(tile => tile.Running);
-        RefreshButton.IsEnabled = !anyRunning;
-        StartAllButton.IsEnabled = _tiles.Any(tile => tile.Camera.HasValue && !tile.Running);
-        StopAllButton.IsEnabled = anyRunning;
-        StartSelectedButton.IsEnabled = selected.Camera.HasValue && !selected.Running;
-        StopSelectedButton.IsEnabled = selected.Running;
-        ApplyBiasButton.IsEnabled = selected.Camera.HasValue;
-        ResolutionComboBox.IsEnabled = true;
-        FrameRateComboBox.IsEnabled = true;
-        CameraComboBox.IsEnabled = !selected.Running;
+        bool selectedRunning = _tiles[_selectedSlot].Running;
+        bool ready = _nativeInitialized && !_busy;
+
+        BindAddressTextBox.IsEnabled = ready && !anyRunning;
+        BasePortTextBox.IsEnabled = ready && !anyRunning;
+        ApplyNetworkButton.IsEnabled = ready && !anyRunning;
+        StartAllButton.IsEnabled = ready;
+        StopAllButton.IsEnabled = ready && anyRunning;
+        StartSelectedButton.IsEnabled = ready && !selectedRunning;
+        StopSelectedButton.IsEnabled = ready && selectedRunning;
+        SlotComboBox.IsEnabled = !_busy;
+        DisplayContentComboBox.IsEnabled = ready;
+        ResolutionComboBox.IsEnabled = ready;
+        FrameRateComboBox.IsEnabled = ready;
     }
 
     private void ShowError(string message)
     {
         MessageTextBlock.Text = message;
-        MessageBox.Show(this, message, "上位机错误", MessageBoxButton.OK, MessageBoxImage.Error);
+        MessageBox.Show(this, message, "UDP上位机", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private void ShowFatal(string message)
     {
-        ShowError(message);
-        _nativeInitialized = false;
+        MessageTextBlock.Text = message;
+        MessageBox.Show(this, message, "UDP上位机启动失败", MessageBoxButton.OK, MessageBoxImage.Error);
         UpdateControlAvailability();
     }
 
